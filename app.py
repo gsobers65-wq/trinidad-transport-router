@@ -5,136 +5,171 @@ from streamlit_folium import st_folium
 from sklearn.cluster import KMeans
 import numpy as np
 
-# Set up page config
-st.set_page_config(page_title="Trinidad Transport Router", layout="wide")
-
-st.title("🇹🇹 Trinidad Transport Logistics Router")
+st.set_page_config(page_title="Tucker Dynamic Logistics Router", layout="wide")
+st.title("🇹🇹 Tucker Energy Services - Dynamic Transport Router")
 st.markdown("---")
 
-# 1. DEFINE GEOGRAPHIC DATA MATRIX (Trinidad Hubs)
-# Base coordinates set to San Fernando
-BASE_COORDS = (10.2741, -61.4583) # San Fernando
-
-LOCATIONS = {
-    "San Fernando (Base)": {"lat": 10.2741, "lon": -61.4583},
-    "Point Lisas Industrial Estate": {"lat": 10.3952, "lon": -61.4795},
-    "Port of Spain Port": {"lat": 10.6520, "lon": -61.5170},
-    "Chaguaramas": {"lat": 10.6830, "lon": -61.6331},
-    "Arima": {"lat": 10.6385, "lon": -61.2825},
-    "Caroni / Chaguanas": {"lat": 10.5167, "lon": -61.4111},
+# 1. FIXED CORPORATE FACILITY COORDINATES
+FACILITIES = {
+    "San Fernando (Base)": {"lat": 10.2795, "lon": -61.4542},
+    "TESL Wireline Division (San Fernando)": {"lat": 10.2748, "lon": -61.4645},
+    "TESL Head Office (Port of Spain)": {"lat": 10.6548, "lon": -61.5162},
+    "TESL Chaguaramas Service Centre": {"lat": 10.6811, "lon": -61.6295},
+    "Cronstadt Island Facility": {"lat": 10.6552, "lon": -61.6310},
+    "TESL Guapo Facility": {"lat": 10.1983, "lon": -61.6421},
     "Point Fortin (Atlantic LNG)": {"lat": 10.1818, "lon": -61.6781},
-    "Siparia": {"lat": 10.1333, "lon": -61.5000},
-    "Fyzabad": {"lat": 10.1770, "lon": -61.5451},
-    "Princes Town": {"lat": 10.2667, "lon": -61.3833},
-    "Mayaro / Galeota Point": {"lat": 10.1415, "lon": -61.0112},
+    "Point Lisas Industrial Estate": {"lat": 10.3952, "lon": -61.4795},
+    "Galeota Point / Mayaro Terminal": {"lat": 10.1415, "lon": -61.0112},
+    "Chaguanas Hub": {"lat": 10.5167, "lon": -61.4111},
+    "Arima Area": {"lat": 10.6385, "lon": -61.2825},
     "Sangre Grande": {"lat": 10.5833, "lon": -61.1167},
-    "Guayaguayare": {"lat": 10.1333, "lon": -61.0333},
 }
+BASE_COORDS = FACILITIES["San Fernando (Base)"]
 
-# 2. SIDEBAR - COORDINATOR INPUTS
-st.sidebar.header("🚚 Dispatch Controls")
+# 2. INITIALIZE LIVE SESSION DATABASE
+if "job_queue" not in st.session_state:
+    st.session_state.job_queue = []
 
-available_trucks = st.sidebar.slider("Number of Available Trucks Today", min_value=1, max_value=8, value=3)
-max_stops = st.sidebar.slider("Max Allowed Stops per Truck", min_value=1, max_value=4, value=2)
+# 3. SIDEBAR CONTROLS
+st.sidebar.header("🚚 Fleet Status")
+available_trucks = st.sidebar.slider("Active Trucks Today", min_value=1, max_value=10, value=4)
 
-st.sidebar.subheader("📍 Select Today's Job Locations")
-selected_locs = []
-for loc in LOCATIONS.keys():
-    if loc == "San Fernando (Base)":
-        continue # Base is mandatory, don't checkbox it
-    if st.sidebar.checkbox(loc, value=False):
-        selected_locs.append(loc)
+st.sidebar.markdown("---")
+st.sidebar.header("📍 Log New Transport Request")
 
-# 3. ROUTING & CLUSTERING LOGIC
-if st.sidebar.button("🚀 Optimize Routes & Assign Trucks"):
-    if not selected_locs:
-        st.warning("Please select at least one job location from the sidebar.")
-    else:
-        st.subheader("📋 Optimized Dispatch Plan")
+# Job input form
+with st.sidebar.form(key="job_form", clear_on_submit=True):
+    equipment = st.text_input("Equipment Description", placeholder="e.g., Wireline Toolstring, Pumping Manifold")
+    pickup = st.selectbox("Pick-up Location", options=list(FACILITIES.keys()))
+    dropoff = st.selectbox("Drop-off Location", options=list(FACILITIES.keys()))
+    priority = st.selectbox("Urgency", ["Normal Routine", "🚨 LAST MINUTE / URGENT"])
+    
+    submit_job = st.form_submit_button(label="Add Job to Queue")
+    
+    if submit_job:
+        if pickup == dropoff:
+            st.error("Pick-up and Drop-off cannot be the same location.")
+        elif not equipment:
+            st.error("Please enter an equipment description.")
+        else:
+            # Append new job to live session list
+            new_job = {
+                "id": len(st.session_state.job_queue) + 1,
+                "equipment": equipment,
+                "pickup": pickup,
+                "dropoff": dropoff,
+                "priority": priority,
+                "status": "Pending Dispatch"
+            }
+            st.session_state.job_queue.append(new_job)
+            st.success(f"Added: {equipment}")
+
+# Clear board function
+if st.sidebar.button("🗑️ Clear Entire Board for New Day"):
+    st.session_state.job_queue = []
+    st.rerun()
+
+# 4. DISPLAY LIVE JOB QUEUE TABLE
+st.subheader("📋 Active Job Queue")
+if not st.session_state.job_queue:
+    st.info("No jobs logged yet. Use the sidebar menu to log morning runs or add last-minute day requests.")
+else:
+    df_queue = pd.DataFrame(st.session_state.job_queue)
+    st.dataframe(df_queue, use_container_width=True, hide_index=True)
+    
+    # 5. OPTIMIZATION AND ROUTING MATH
+    st.markdown("---")
+    
+    # Extract unique locations involved in today's pending jobs to perform clustering
+    active_jobs = st.session_state.job_queue
+    
+    # Calculate geographical routing
+    coordinates = []
+    job_mapping = []
+    
+    for idx, job in enumerate(active_jobs):
+        # We grab coordinates for the pickup point to decide which truck handles the zone
+        p_coords = FACILITIES[job["pickup"]]
+        coordinates.append([p_coords["lat"], p_coords["lon"]])
+        job_mapping.append(idx)
         
-        # Prepare coordinates for clustering
-        coordinates = np.array([[LOCATIONS[l]["lat"], LOCATIONS[l]["lon"]] for l in selected_locs])
-        
-        # Determine optimal number of clusters (cannot exceed number of selected locations or available trucks)
-        num_clusters = min(available_trucks, len(selected_locs))
-        
-        # Run KMeans to cluster geographically close locations together
+    if coordinates:
+        num_clusters = min(available_trucks, len(coordinates))
         kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10).fit(coordinates)
         labels = kmeans.labels_
         
-        # Organize jobs by truck
         truck_assignments = {f"Truck {i+1}": [] for i in range(num_clusters)}
-        for loc, label in zip(selected_locs, labels):
-            truck_assignments[f"Truck {label+1}"].append(loc)
+        for job_idx, label in zip(job_mapping, labels):
+            truck_assignments[f"Truck {label+1}"].append(active_jobs[job_idx])
             
-        # Color palette for map visualization
-        colors = ['blue', 'green', 'orange', 'purple', 'cadetblue', 'darkred', 'pink', 'gray']
-        
-        # Create Layout Columns: Left for Map, Right for Text Summary
+        # UI Columns
         col1, col2 = st.columns([2, 1])
         
         with col2:
-            st.info("💡 **Routing Summary**")
+            st.subheader("🏁 Live Dispatch Manifest")
             for truck, jobs in truck_assignments.items():
-                if len(jobs) > max_stops:
-                    # Split if it exceeds the coordinator's maximum stops rule
-                    st.error(f"⚠️ **{truck}** overloaded! Needs {len(jobs)} stops. Consider adding more trucks.")
+                # Visual separator if a last-minute hot job is inside
+                has_urgent = any(j["priority"] == "🚨 LAST MINUTE / URGENT" for j in jobs)
                 
-                st.write(f"**{truck}:**")
-                st.write(f"🚩 *Start:* San Fernando (Base)")
-                for idx, job in enumerate(jobs, 1):
-                    st.write(f" ➡️ **Stop {idx}:** {job}")
-                st.write(f" ➡️ *Return:* San Fernando (Base)")
+                if has_urgent:
+                    st.error(f"⚡ **{truck}** - Modified Route (Urgent Job Attached!)")
+                else:
+                    st.subheader(f"🚛 {truck}")
+                    
+                st.write("📍 **Sequence:**")
+                st.write("🏠 *Depart:* San Fernando (Base)")
+                
+                for j in jobs:
+                    marker_prefix = "⚡ [URGENT] " if j["priority"] == "🚨 LAST MINUTE / URGENT" else ""
+                    st.write(f" 📦 **Pick up:** {marker_prefix}{j['equipment']} @ *{j['pickup']}*")
+                    st.write(f" 🏁 **Drop off:** {j['equipment']} @ *{j['dropoff']}*")
+                st.write("🏠 *Return:* San Fernando (Base)")
                 st.markdown("---")
                 
         with col1:
-            # Build the interactive Map
+            st.subheader("🗺️ Live Route Monitoring")
             m = folium.Map(location=[10.4, -61.3], zoom_start=10, tiles="CartoDB positron")
             
-            # Draw Base Location (San Fernando)
+            # Base Marker
             folium.Marker(
-                location=BASE_COORDS,
-                popup="<b>CENTRAL BASE: San Fernando</b>",
+                location=[BASE_COORDS["lat"], BASE_COORDS["lon"]],
+                popup="<b>MAIN PUMPING BASE</b>",
                 icon=folium.Icon(color="red", icon="home", prefix="fa")
             ).add_to(m)
             
-            # Draw routes and drop-off markers
+            colors = ['blue', 'green', 'orange', 'purple', 'cadetblue', 'darkred', 'pink', 'gray']
+            
             for truck_idx, (truck, jobs) in enumerate(truck_assignments.items()):
                 truck_color = colors[truck_idx % len(colors)]
+                route_points = [[BASE_COORDS["lat"], BASE_COORDS["lon"]]]
                 
-                # We start a line string path tracking: Base -> Jobs -> Base
-                route_points = [BASE_COORDS]
-                
-                for job in jobs:
-                    job_coords = (LOCATIONS[job]["lat"], LOCATIONS[job]["lon"])
-                    route_points.append(job_coords)
+                for j in jobs:
+                    p_loc = FACILITIES[j["pickup"]]
+                    d_loc = FACILITIES[j["dropoff"]]
                     
-                    # Add job marker
+                    route_points.append([p_loc["lat"], p_loc["lon"]])
+                    route_points.append([d_loc["lat"], d_loc["lon"]])
+                    
+                    # Map pin flags
                     folium.Marker(
-                        location=job_coords,
-                        popup=f"<b>{job}</b><br>Assigned to: {truck}",
-                        icon=folium.Icon(color=truck_color, icon="truck", prefix="fa")
+                        location=[p_loc["lat"], p_loc["lon"]],
+                        popup=f"Pick up: {j['equipment']} ({truck})",
+                        icon=folium.Icon(color=truck_color, icon="arrow-up", prefix="fa")
                     ).add_to(m)
                     
-                route_points.append(BASE_COORDS) # Loop back to base
+                    folium.Marker(
+                        location=[d_loc["lat"], d_loc["lon"]],
+                        popup=f"Drop off: {j['equipment']} ({truck})",
+                        icon=folium.Icon(color=truck_color, icon="flag", prefix="fa")
+                    ).add_to(m)
+                    
+                route_points.append([BASE_COORDS["lat"], BASE_COORDS["lon"]])
                 
-                # Draw the driving path line on the map
                 folium.PolyLine(
                     locations=route_points,
                     color=truck_color,
                     weight=4,
-                    opacity=0.7,
-                    tooltip=f"Route Path for {truck}"
+                    opacity=0.75
                 ).add_to(m)
-            
-            # Display map in Streamlit layout
+                
             st_folium(m, width=800, height=600, returned_objects=[])
-
-else:
-    # Default State when app first opens
-    st.info("👈 Select available trucks and checked job destinations on the left sidebar, then click 'Optimize Routes'.")
-    
-    # Show an empty layout map centered on Trinidad
-    m = folium.Map(location=[10.4, -61.3], zoom_start=10, tiles="CartoDB positron")
-    folium.Marker(location=BASE_COORDS, popup="San Fernando Base", icon=folium.Icon(color="red", icon="home")).add_to(m)
-    st_folium(m, width=800, height=500, returned_objects=[])
